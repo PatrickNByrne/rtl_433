@@ -21,20 +21,23 @@
 // ** Acurite 5n1 functions **
 
 #define ACURITE_TXR_BITLEN        56
-#define ACURITE_5N1_BITLEN        64
-#define ACURITE_6045_BITLEN        72
+#define ACURITE_5N1_BITLEN        64 // Also used by Atlas devices w/o lightning sensor
+#define ACURITE_6045_BITLEN       72
 #define ACURITE_ATLAS_BITLEN      80
 
 // ** Acurite known message types
-#define ACURITE_MSGTYPE_TOWER_SENSOR                    0x04
-#define ACURITE_MSGTYPE_6045M                           0x2f
-#define ACURITE_MSGTYPE_5N1_WINDSPEED_WINDDIR_RAINFALL  0x31
-#define ACURITE_MSGTYPE_5N1_WINDSPEED_TEMP_HUMIDITY     0x38
-#define ACURITE_MSGTYPE_3N1_WINDSPEED_TEMP_HUMIDITY     0x20
-#define ACURITE_MSGTYPE_RAINFALL                        0x30
-#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_TEMP_HUMIDITY   0x25
-#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_RAINFALL        0x26
-#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_UV_LUX          0x27
+#define ACURITE_MSGTYPE_TOWER_SENSOR                       0x04
+#define ACURITE_MSGTYPE_6045M                              0x2f
+#define ACURITE_MSGTYPE_5N1_WINDSPEED_WINDDIR_RAINFALL     0x31
+#define ACURITE_MSGTYPE_5N1_WINDSPEED_TEMP_HUMIDITY        0x38
+#define ACURITE_MSGTYPE_3N1_WINDSPEED_TEMP_HUMIDITY        0x20
+#define ACURITE_MSGTYPE_RAINFALL                           0x30
+#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_TEMP_HUMIDITY      0x25
+#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_RAINFALL           0x26
+#define ACURITE_MSGTYPE_ATLAS_WINDSPEED_UV_LUX             0x27
+#define ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_TEMP_HUMIDITY   0x05
+#define ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_RAINFALL        0x06
+#define ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_UV_LUX          0x07
 
 // Acurite 5n1 Wind direction values.
 // There are seem to be conflicting decodings.
@@ -587,6 +590,109 @@ static int acurite_txr_decode(r_device *decoder, bitbuffer_t *bitbuffer)
             valid++;
         }
 
+        else if ( (browlen == ACURITE_ATLAS_BITLEN / 8) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_TEMP_HUMIDITY) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_RAINFALL) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_UV_LUX) ) {
+            // {80} 82 f3 65 00 88 72 22 00 9f 95  {80} 86 f3 65 00 88 72 22 00 9f 99  {80} 8a f3 65 00 88 72 22 00 9f 9d
+            // {80} 82 f3 66 00 05 e4 81 00 9f e4  {80} 86 f3 66 00 05 e4 81 00 9f e8  {80} 8a f3 66 00 05 e4 81 00 9f ec
+            // {80} 82 f3 e7 00 00 00 96 00 9f 91  {80} 86 f3 e7 00 00 00 96 00 9f 95  {80} 8a f3 e7 00 00 00 96 00 9f 99
+            // {80} 82 f3 66 00 05 60 81 00 9f 60  {80} 86 f3 66 00 05 60 81 00 9f 64  {80} 8a f3 66 00 05 60 81 00 9f 68
+            // {80} 82 f3 65 00 88 71 24 00 9f 96  {80} 86 f3 65 00 88 71 24 00 9f 9a  {80} 8a f3 65 00 88 71 24 00 9f 9e
+            // {80} 82 f3 65 00 88 71 a5 00 9f 17  {80} 86 f3 65 00 88 71 a5 00 9f 1b  {80} 8a f3 65 00 88 71 a5 00 9f 1f
+            bitrow_printf(bb, bitbuffer->bits_per_row[brow], "%s: Acurite Atlas raw msg: ", __func__);
+            sensor_id = ((bb[0] & 0x03) << 8) | bb[1];
+            channel   = acurite_getChannel(bb[0]);
+            sprintf(channel_str, "%c", channel);
+
+            // The sensor sends the same data three times, each of these have
+            // an indicator of which one of the three it is. This means the
+            // checksum and first byte will be different for each one.
+            // The bits 4,5 of byte 0 indicate which copy
+            //  xxxx 00 xx = first copy
+            //  xxxx 01 xx = second copy
+            //  xxxx 10 xx = third copy
+            sequence_num = (bb[0] & 0x0c) >> 2;
+            // Battery status is the 7th bit 0x40. 1 = normal, 0 = low
+            battery_low = (bb[2] & 0x40) == 0;
+
+            // Wind speed is 8-bits raw MPH
+            wind_speed_mph = ((bb[3] & 0x7F) << 1) | ((bb[4] & 0x40) >> 6);
+
+            /* clang-format off */
+            data = data_make(
+                    "model",            "",         DATA_STRING, "Acurite-Atlas",
+                    "id",               NULL,       DATA_INT,    sensor_id,
+                    "channel",          NULL,       DATA_STRING, &channel_str,
+                    "sequence_num",     NULL,       DATA_INT,    sequence_num,
+                    "battery_ok",       NULL,       DATA_INT,    !battery_low,
+                    "message_type",     NULL,       DATA_INT,    message_type,
+                    "wind_avg_mi_h",    "Wind Speed", DATA_FORMAT, "%.1f mi/h", DATA_DOUBLE, wind_speed_mph,
+                    NULL);
+            /* clang-format on */
+
+            if ( (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_TEMP_HUMIDITY) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_TEMP_HUMIDITY) ) {
+                // Wind speed, temperature and humidity
+
+                // range -40 to 160 F
+                // FIXME: are there really 13 bits? use 11 for now.
+                int temp_raw = (bb[4] & 0x0F) << 7 | (bb[5] & 0x7F);
+                tempf = (temp_raw - 400) * 0.1;
+
+                humidity = (bb[6] & 0x7f); // 1-99 %rH
+
+                /* clang-format off */
+                data = data_append(data,
+                        "temperature_F",    "temperature",  DATA_FORMAT,    "%.1f F",       DATA_DOUBLE, tempf,
+                        "humidity",         NULL,           DATA_FORMAT,    "%u %%",        DATA_INT,    humidity,
+                        NULL);
+                /* clang-format on */
+            }
+
+            if ( (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_RAINFALL) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_RAINFALL) ) {
+                // Wind speed, wind direction, and rain fall
+                wind_dir = ((bb[4] & 0x1f) << 5) | ((bb[5] & 0x7c) >> 2);
+
+                // range: 0 to 99.99 in, 0.01 inch increments, accumulated
+                // FIXME: are there really only 7 bits? use 9 for now.
+                raincounter = ((bb[5] & 0x03) << 7) | (bb[6] & 0x7F);
+
+                /* clang-format off */
+                data = data_append(data,
+                        "wind_dir_deg",     NULL,           DATA_FORMAT,    "%.1f",         DATA_DOUBLE, wind_dir,
+                        "rain_in",          "Rainfall Accumulation", DATA_FORMAT, "%.2f in", DATA_DOUBLE, raincounter * 0.01f,
+                        NULL);
+                /* clang-format on */
+            }
+
+            if ( (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_UV_LUX) || (message_type == ACURITE_MSGTYPE_ATLAS_NL_WINDSPEED_UV_LUX) ) {
+                // Wind speed, UV Index, Light Intensity, Lightning?
+                int uv = (bb[4] & 0x3f);
+                int lux = ((bb[5] & 0x7f) << 7) | (bb[6] & 0x7F);
+
+                /* clang-format off */
+                data = data_append(data,
+                        "uv",               NULL,           DATA_INT, uv,
+                        "lux",              NULL,           DATA_INT, lux * 10,
+                        NULL);
+                /* clang-format on */
+            }
+
+            if ( (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_TEMP_HUMIDITY) || (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_RAINFALL) || (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_UV_LUX) ) {
+                int byte8  = (bb[7] & 0x7f);
+                int byte9  = (bb[8] & 0x7f);
+                int byte89 = ((bb[7] & 0x7f) << 7) | (bb[8] & 0x7F);
+
+                /* clang-format off */
+                data = data_append(data,
+                        "byte8",                NULL,           DATA_INT, byte8,
+                        "byte9",                NULL,           DATA_INT, byte9,
+                        "byte89",               NULL,           DATA_INT, byte89,
+                        NULL);
+                /* clang-format on */
+            }
+
+            decoder_output_data(decoder, data);
+            valid++;
+        }
+
         // The 5-n-1 weather sensor messages are 8 bytes.
         else if (browlen == ACURITE_5N1_BITLEN / 8) {
             if (decoder->verbose)
@@ -722,111 +828,9 @@ static int acurite_txr_decode(r_device *decoder, bitbuffer_t *bitbuffer)
                     __func__, sensor_id, channel, bb[3], message_type);
             }
         }
-
         else if (browlen == ACURITE_6045_BITLEN / 8) {
             // TODO: check parity and reject if invalid
             valid += acurite_6045_decode(decoder, bb, browlen);
-        }
-
-        else if (browlen == ACURITE_ATLAS_BITLEN / 8) {
-            // {80} 82 f3 65 00 88 72 22 00 9f 95  {80} 86 f3 65 00 88 72 22 00 9f 99  {80} 8a f3 65 00 88 72 22 00 9f 9d
-            // {80} 82 f3 66 00 05 e4 81 00 9f e4  {80} 86 f3 66 00 05 e4 81 00 9f e8  {80} 8a f3 66 00 05 e4 81 00 9f ec
-            // {80} 82 f3 e7 00 00 00 96 00 9f 91  {80} 86 f3 e7 00 00 00 96 00 9f 95  {80} 8a f3 e7 00 00 00 96 00 9f 99
-            // {80} 82 f3 66 00 05 60 81 00 9f 60  {80} 86 f3 66 00 05 60 81 00 9f 64  {80} 8a f3 66 00 05 60 81 00 9f 68
-            // {80} 82 f3 65 00 88 71 24 00 9f 96  {80} 86 f3 65 00 88 71 24 00 9f 9a  {80} 8a f3 65 00 88 71 24 00 9f 9e
-            // {80} 82 f3 65 00 88 71 a5 00 9f 17  {80} 86 f3 65 00 88 71 a5 00 9f 1b  {80} 8a f3 65 00 88 71 a5 00 9f 1f
-            bitrow_printf(bb, bitbuffer->bits_per_row[brow], "%s: Acurite Atlas raw msg: ", __func__);
-            sensor_id = ((bb[0] & 0x03) << 8) | bb[1];
-            channel   = acurite_getChannel(bb[0]);
-            sprintf(channel_str, "%c", channel);
-
-            // The sensor sends the same data three times, each of these have
-            // an indicator of which one of the three it is. This means the
-            // checksum and first byte will be different for each one.
-            // The bits 4,5 of byte 0 indicate which copy
-            //  xxxx 00 xx = first copy
-            //  xxxx 01 xx = second copy
-            //  xxxx 10 xx = third copy
-            sequence_num = (bb[0] & 0x0c) >> 2;
-            // Battery status is the 7th bit 0x40. 1 = normal, 0 = low
-            battery_low = (bb[2] & 0x40) == 0;
-
-            // Wind speed is 8-bits raw MPH
-            wind_speed_mph = ((bb[3] & 0x7F) << 1) | ((bb[4] & 0x40) >> 6);
-
-            /* clang-format off */
-            data = data_make(
-                    "model",            "",         DATA_STRING, "Acurite-Atlas",
-                    "id",               NULL,       DATA_INT,    sensor_id,
-                    "channel",          NULL,       DATA_STRING, &channel_str,
-                    "sequence_num",     NULL,       DATA_INT,    sequence_num,
-                    "battery_ok",       NULL,       DATA_INT,    !battery_low,
-                    "message_type",     NULL,       DATA_INT,    message_type,
-                    "wind_avg_mi_h",    "Wind Speed", DATA_FORMAT, "%.1f mi/h", DATA_DOUBLE, wind_speed_mph,
-                    NULL);
-            /* clang-format on */
-
-            if (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_TEMP_HUMIDITY) {
-                // Wind speed, temperature and humidity
-
-                // range -40 to 160 F
-                // FIXME: are there really 13 bits? use 11 for now.
-                int temp_raw = (bb[4] & 0x0F) << 7 | (bb[5] & 0x7F);
-                tempf = (temp_raw - 400) * 0.1;
-
-                humidity = (bb[6] & 0x7f); // 1-99 %rH
-
-                /* clang-format off */
-                data = data_append(data,
-                        "temperature_F",    "temperature",  DATA_FORMAT,    "%.1f F",       DATA_DOUBLE, tempf,
-                        "humidity",         NULL,           DATA_FORMAT,    "%u %%",        DATA_INT,    humidity,
-                        NULL);
-                /* clang-format on */
-            }
-
-            if (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_RAINFALL) {
-                // Wind speed, wind direction, and rain fall
-                wind_dir = ((bb[4] & 0x1f) << 5) | ((bb[5] & 0x7c) >> 2);
-
-                // range: 0 to 99.99 in, 0.01 inch increments, accumulated
-                // FIXME: are there really only 7 bits? use 9 for now.
-                raincounter = ((bb[5] & 0x03) << 7) | (bb[6] & 0x7F);
-
-                /* clang-format off */
-                data = data_append(data,
-                        "wind_dir_deg",     NULL,           DATA_FORMAT,    "%.1f",         DATA_DOUBLE, wind_dir,
-                        "rain_in",          "Rainfall Accumulation", DATA_FORMAT, "%.2f in", DATA_DOUBLE, raincounter * 0.01f,
-                        NULL);
-                /* clang-format on */
-            }
-
-            if (message_type == ACURITE_MSGTYPE_ATLAS_WINDSPEED_UV_LUX) {
-                // Wind speed, UV Index, Light Intensity, Lightning?
-                int uv = (bb[4] & 0x3f);
-                int lux = ((bb[5] & 0x7f) << 7) | (bb[6] & 0x7F);
-
-                /* clang-format off */
-                data = data_append(data,
-                        "uv",               NULL,           DATA_INT, uv,
-                        "lux",              NULL,           DATA_INT, lux * 10,
-                        NULL);
-                /* clang-format on */
-            }
-
-            int byte8  = (bb[7] & 0x7f);
-            int byte9  = (bb[8] & 0x7f);
-            int byte89 = ((bb[7] & 0x7f) << 7) | (bb[8] & 0x7F);
-
-            /* clang-format off */
-            data = data_append(data,
-                    "byte8",                NULL,           DATA_INT, byte8,
-                    "byte9",                NULL,           DATA_INT, byte9,
-                    "byte89",               NULL,           DATA_INT, byte89,
-                    NULL);
-            /* clang-format on */
-
-            decoder_output_data(decoder, data);
-            valid++;
         }
     }
 
